@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Line Through Origin – y = a x</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --panel: #f8fafc;
+        --text: #0f172a;
+        --muted: #475569;
+        --accent: #b45309; /* amber-700 for better contrast on white */
+        --point: #2563eb;  /* blue-600 */
+        --axis: #334155;   /* slate-700 */
+        --grid: #e2e8f0;   /* slate-200 */
+        --projection: #ef4444; /* red-500 for projected points */
+        --optimal: #16a34a; /* green-600 for optimal highlight */
+        --residual: #7c3aed; /* violet-600 for squared residual labels */
+      }
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      }
+      .wrap {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+      header h1 {
+        font-size: 20px;
+        margin: 0 0 2px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .controls {
+        background: var(--panel);
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .controls label {
+        font-weight: 600;
+      }
+      input[type="range"] {
+        width: min(520px, 70vw);
+      }
+      .value {
+        min-width: 8ch;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2px 8px;
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      .panel {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 10px;
+      }
+      canvas {
+        width: 100%;
+        height: 60vh;
+        display: block;
+        border-radius: 8px;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .legend {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 6px;
+        flex-wrap: wrap;
+      }
+      .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+      .swatch.point { background: var(--point); }
+      .swatch.line  { background: var(--accent); }
+      .swatch.axis  { background: var(--axis); }
+      .swatch.proj  { background: var(--projection); }
+      .muted { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Fit a Line Through Origin: y = a x</h1>
+        <p>Use the slider to change the slope a. Two sample points are shown.</p>
+      </header>
+
+      <div class="controls">
+        <label for="aSlider">a (slope):</label>
+        <input id="aSlider" type="range" min="-5" max="5" step="0.1" value="1" />
+        <span class="value">a = <span id="aValue">1.0</span></span>
+        <span class="note">World coordinates: x ∈ [−10, 10], y ∈ [−10, 10]</span>
+      </div>
+
+      <div class="panel" id="calcPanel" aria-live="polite">
+        <div style="font-weight:600; margin-bottom:6px;">MSE calculation for y = a x</div>
+        <div id="mseBreakdown" class="muted" style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace; font-size: 13px;"></div>
+      </div>
+
+      <div class="panel">
+        <canvas id="plot" aria-label="Cartesian plane with two points and a line through the origin y = a x."></canvas>
+        <div class="legend">
+          <span><span class="swatch point"></span>Points</span>
+          <span><span class="swatch line"></span>Line y = a x</span>
+          <span><span class="swatch proj"></span>Projections on y = a x</span>
+          <span><span class="swatch axis"></span>Axes</span>
+          <span class="muted">Grid spacing: 1</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // World (math) coordinates
+      const world = {
+        xMin: -10,
+        xMax: 10,
+        yMin: -10,
+        yMax: 10,
+      };
+
+      // Two sample points
+      const points = [
+        { x: -4, y: 3 },
+        { x: 5, y: -2 },
+      ];
+
+      const canvas = document.getElementById('plot');
+      const ctx = canvas.getContext('2d');
+      const slider = document.getElementById('aSlider');
+      const aValue = document.getElementById('aValue');
+      const mseBreakdown = document.getElementById('mseBreakdown');
+
+      // Track canvas CSS size for crisp drawing in CSS pixel units
+      let cssW = 0, cssH = 0;
+
+      function resizeCanvasToDisplaySize() {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const { clientWidth, clientHeight } = canvas;
+        if (cssW === clientWidth && cssH === clientHeight) return false;
+        cssW = clientWidth; cssH = clientHeight;
+        canvas.width = Math.floor(clientWidth * dpr);
+        canvas.height = Math.floor(clientHeight * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixel units
+        return true;
+      }
+
+      // Mapping: world -> screen (CSS px)
+      function worldToScreen(x, y) {
+        const sx = (x - world.xMin) / (world.xMax - world.xMin) * cssW;
+        const sy = cssH - (y - world.yMin) / (world.yMax - world.yMin) * cssH;
+        return [sx, sy];
+      }
+
+      function drawGrid() {
+        ctx.save();
+        ctx.clearRect(0, 0, cssW, cssH);
+        ctx.lineWidth = 1;
+
+        // Grid lines every 1 unit
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
+        ctx.beginPath();
+        for (let x = Math.ceil(world.xMin); x <= Math.floor(world.xMax); x++) {
+          const [sx] = worldToScreen(x, 0);
+          ctx.moveTo(Math.round(sx) + 0.5, 0);
+          ctx.lineTo(Math.round(sx) + 0.5, cssH);
+        }
+        for (let y = Math.ceil(world.yMin); y <= Math.floor(world.yMax); y++) {
+          const [, sy] = worldToScreen(0, y);
+          ctx.moveTo(0, Math.round(sy) + 0.5);
+          ctx.lineTo(cssW, Math.round(sy) + 0.5);
+        }
+        ctx.stroke();
+
+        // Axes
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis').trim();
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const [x0s] = worldToScreen(0, 0);
+        ctx.moveTo(Math.round(x0s) + 0.5, 0);
+        ctx.lineTo(Math.round(x0s) + 0.5, cssH);
+        const [, y0s] = worldToScreen(0, 0);
+        ctx.moveTo(0, Math.round(y0s) + 0.5);
+        ctx.lineTo(cssW, Math.round(y0s) + 0.5);
+        ctx.stroke();
+
+        // Tick labels (every 2 units)
+        ctx.fillStyle = '#475569';
+        ctx.font = '12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (let x = Math.ceil(world.xMin); x <= Math.floor(world.xMax); x += 2) {
+          const [sx, syZero] = worldToScreen(x, 0);
+          const yLabel = Math.min(cssH - 14, Math.max(0, syZero + 4));
+          ctx.fillText(String(x), sx, yLabel);
+        }
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (let y = Math.ceil(world.yMin); y <= Math.floor(world.yMax); y += 2) {
+          const [sxZero, sy] = worldToScreen(0, y);
+          const xLabel = Math.min(cssW - 4, Math.max(0, sxZero - 6));
+          ctx.fillText(String(y), xLabel, sy);
+        }
+
+        ctx.restore();
+      }
+
+      function drawPoints() {
+        ctx.save();
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--point').trim();
+        for (const p of points) {
+          const [sx, sy] = worldToScreen(p.x, p.y);
+          ctx.beginPath();
+          ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawAxLine(a, highlight = false) {
+        ctx.save();
+        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+        const optimal = getComputedStyle(document.documentElement).getPropertyValue('--optimal').trim();
+        ctx.strokeStyle = highlight ? optimal : accent;
+        ctx.lineWidth = highlight ? 3.5 : 2.5;
+        if (highlight) {
+          ctx.shadowColor = 'rgba(22,163,74,0.35)';
+          ctx.shadowBlur = 8;
+        }
+        const [xMinS, yMinS] = worldToScreen(world.xMin, a * world.xMin);
+        const [xMaxS, yMaxS] = worldToScreen(world.xMax, a * world.xMax);
+        ctx.beginPath();
+        ctx.moveTo(xMinS, Math.round(yMinS) + 0.5);
+        ctx.lineTo(xMaxS, Math.round(yMaxS) + 0.5);
+        ctx.stroke();
+
+        // Label 'y = a x' near the line
+        const label = `y = ${a.toFixed(1)} x`;
+        ctx.shadowBlur = 0;
+        // place near right side at y(a*x)
+        const [xS, yS] = worldToScreen(world.xMax - 2, a * (world.xMax - 2));
+        const pad = 6;
+        const margin = 8;
+        let labelX = xS - 50;
+        let labelY = yS - 20;
+        if (labelY < margin) labelY = yS + 8;
+        if (labelY > cssH - margin - 18) labelY = cssH - margin - 18;
+        if (labelX < margin) labelX = margin;
+
+        ctx.font = '13px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial';
+        const metrics = ctx.measureText(label);
+        const textW = metrics.width;
+        const textH = (metrics.actualBoundingBoxAscent || 9) + (metrics.actualBoundingBoxDescent || 3);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 1;
+        roundRect(ctx, labelX - pad, labelY - pad, textW + pad * 2, textH + pad * 2, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#0f172a';
+        ctx.textBaseline = 'top';
+        ctx.fillText(label, labelX, labelY);
+
+        ctx.restore();
+      }
+
+      function drawProjections(a) {
+        const projColor = getComputedStyle(document.documentElement).getPropertyValue('--projection').trim();
+        const guideColor = '#94a3b0';
+        const residualColor = getComputedStyle(document.documentElement).getPropertyValue('--residual').trim();
+        ctx.save();
+        for (const p of points) {
+          const [sx, sy] = worldToScreen(p.x, p.y);
+          const [, syAx] = worldToScreen(p.x, a * p.x);
+          // dashed vertical guide
+          ctx.strokeStyle = guideColor;
+          ctx.setLineDash([4, 4]);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(sx) + 0.5, sy);
+          ctx.lineTo(Math.round(sx) + 0.5, syAx);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // projected point on the line
+          ctx.fillStyle = projColor;
+          ctx.beginPath();
+          ctx.arc(sx, syAx, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // label projected coordinates (x, a*x)
+          drawLabel(sx, syAx, `(${p.x.toFixed(1)}, ${(a * p.x).toFixed(1)})`, 8, 8, projColor);
+
+          // label residual squared
+          const r = p.y - a * p.x;
+          const r2 = r * r;
+          const midY = (sy + syAx) / 2;
+          drawLabel(sx, midY, r2.toFixed(2), 6, -10, residualColor);
+        }
+        ctx.restore();
+      }
+
+      // small labeled box near a screen point
+      function drawLabel(sx, sy, text, dx = 8, dy = -12, color) {
+        ctx.save();
+        ctx.font = '12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial';
+        const labelColor = color || getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#0f172a';
+        const bg = 'rgba(255,255,255,0.92)';
+        const border = '#e5e7eb';
+        const padding = 4;
+        const metrics = ctx.measureText(text);
+        const textW = metrics.width;
+        const ascent = metrics.actualBoundingBoxAscent || 9;
+        const descent = metrics.actualBoundingBoxDescent || 3;
+        const textH = ascent + descent;
+        const x = sx + dx;
+        const y = sy + dy;
+        const w = textW + padding * 2;
+        const h = textH + padding * 2;
+
+        ctx.fillStyle = bg;
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1;
+        const r = 4;
+        roundRect(ctx, x - 2, y - 2, w + 4, h + 4, r);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = labelColor;
+        ctx.textBaseline = 'top';
+        ctx.fillText(text, x, y);
+        ctx.restore();
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        ctx.lineTo(x + rr, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+        ctx.lineTo(x, y + rr);
+        ctx.quadraticCurveTo(x, y, x + rr, y);
+        ctx.closePath();
+      }
+
+      function render() {
+        const a = parseFloat(slider.value);
+        aValue.textContent = a.toFixed(1);
+        resizeCanvasToDisplaySize();
+        drawGrid();
+
+        // Compute optimal a* = sum(xy)/sum(x^2)
+        const n = points.length;
+        const sxy = points.reduce((acc, p) => acc + p.x * p.y, 0);
+        const sxx = points.reduce((acc, p) => acc + p.x * p.x, 0);
+        const aOpt = sxx === 0 ? NaN : (sxy / sxx);
+        const step = parseFloat(slider.step || '0.1');
+        const tol = Math.max(1e-6, step / 2);
+        const isOptimal = isFinite(aOpt) && Math.abs(a - aOpt) <= tol;
+
+        drawAxLine(a, isOptimal);
+        drawProjections(a);
+        drawPoints();
+
+        // Residuals and MSE
+        const residuals = points.map((p) => ({ x: p.x, y: p.y, r: p.y - a * p.x }));
+        const squares = residuals.map((r) => r.r * r.r);
+        const sumSquares = squares.reduce((acc, v) => acc + v, 0);
+        const mse = sumSquares / n;
+
+        // Labels for points
+        for (const p of points) {
+          const [sx, sy] = worldToScreen(p.x, p.y);
+          const blue = getComputedStyle(document.documentElement).getPropertyValue('--point').trim();
+          drawLabel(sx, sy, `(${p.x.toFixed(1)}, ${p.y.toFixed(1)})`, 8, -16, blue);
+        }
+
+        // MSE breakdown string
+        const terms = residuals.map((ri) => `(${ri.y.toFixed(2)} - ${a.toFixed(2)}·${ri.x.toFixed(2)})^2`);
+        mseBreakdown.textContent = `MSE = ( ${terms.join(' + ')} ) / ${n} = ${mse.toFixed(4)}`;
+      }
+
+      // Events
+      slider.addEventListener('input', render);
+      window.addEventListener('resize', render);
+
+      // Initial draw
+      render();
+    </script>
+  </body>
+  </html>
